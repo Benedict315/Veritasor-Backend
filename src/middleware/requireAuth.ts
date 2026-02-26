@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import { verifyToken } from '../utils/jwt.js'
 import { findUserById } from '../repositories/userRepository.js'
 
+
 // Extend Express Request to include user
 declare global {
   namespace Express {
@@ -14,6 +15,7 @@ declare global {
     }
   }
 }
+
 
 /**
  * Middleware to verify JWT token from Authorization header
@@ -46,11 +48,15 @@ export async function requireAuth(
     return
   }
 
+
   req.user = {
     id: payload.userId,
     userId: payload.userId,
     email: payload.email,
   }
+
+  req.user = { id: payload.userId, email: payload.email }
+
 
   next()
 }
