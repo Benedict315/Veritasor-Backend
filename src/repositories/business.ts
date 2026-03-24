@@ -111,6 +111,17 @@ export async function getByUserId(userId: string): Promise<Business | null> {
   return result.rows[0] ? toBusiness(result.rows[0]) : null
 }
 
+export async function getAll(): Promise<Business[]> {
+  const result = await dbClient.query<BusinessRow>(
+    `
+      SELECT id, user_id, name, email, industry, description, website, created_at, updated_at
+      FROM businesses
+    `,
+  )
+
+  return result.rows.map(toBusiness)
+}
+
 export async function update(id: string, data: UpdateBusinessData): Promise<Business | null> {
   const updates: string[] = []
   const values: unknown[] = []
@@ -141,7 +152,7 @@ export async function update(id: string, data: UpdateBusinessData): Promise<Busi
   const result = await dbClient.query<BusinessRow>(
     `
       UPDATE businesses
-      SET ${updates.join(', ')}, updated_at = NOW()
+      SET ${updates.join(", ")}, updated_at = NOW()
       WHERE id = $${values.length}
       RETURNING id, user_id, name, email, industry, description, website, created_at, updated_at
     `,
@@ -155,6 +166,7 @@ export const businessRepository = {
   create,
   getById,
   getByUserId,
+  getAll,
   update,
   findById: getById,
   findByUserId: getByUserId,

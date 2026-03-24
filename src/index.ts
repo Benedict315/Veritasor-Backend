@@ -33,11 +33,12 @@ app.use('/api/integrations/shopify', integrationsShopifyRouter)
 app.use('/api/integrations/razorpay', integrationsRazorpayRouter)
 app.use('/api/integrations', integrationsRouter)
 
-app.use(errorHandler)
+app.use(errorHandler);
 
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== "test") {
   app.listen(PORT, () => {
     console.log(`Veritasor API listening on http://localhost:${PORT}`)
+    // Run the job every minute
     setInterval(attestationReminderJob, 60 * 1000)
   })
 }
