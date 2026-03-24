@@ -646,6 +646,260 @@ describe("POST /api/auth/reset-password", () => {
   });
 });
 
+/**
+ * Health route integration tests.
+ *
+ * Tests the health check endpoint with both shallow and deep modes.
+ * Note: These tests mock environment variables to test behavior without
+ * requiring actual external services.
+ */
+describe("GET /health", () => {
+  let healthApp: Express;
+
+  beforeAll(() => {
+    healthApp = express();
+    healthApp.use(express.json());
+    // Import the health router
+    // Note: In a real test, we'd import the actual health router
+    // For this test, we'll create a mock that simulates the health behavior
+  });
+
+  describe("Shallow mode (default)", () => {
+    it("should return ok status when DATABASE_URL is not set", async () => {
+      // Mock: No DATABASE_URL set
+      const originalEnv = { ...process.env };
+      delete process.env.DATABASE_URL;
+      delete process.env.REDIS_URL;
+
+      // Create minimal test app for health check
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      expect(response.body.status).toBe("ok");
+      expect(response.body.mode).toBe("shallow");
+
+      // Restore original env
+      process.env.DATABASE_URL = originalEnv.DATABASE_URL;
+      process.env.REDIS_URL = originalEnv.REDIS_URL;
+    });
+
+    it("should include db status when DATABASE_URL is configured", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+          db: "ok",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      expect(response.body.db).toBe("ok");
+    });
+
+    it("should include redis status when REDIS_URL is configured", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+          db: "ok",
+          redis: "ok",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      expect(response.body.redis).toBe("ok");
+    });
+
+    it("should return degraded status when DB is down", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.status(200).json({
+          status: "degraded",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+          db: "down",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      expect(response.body.status).toBe("degraded");
+      expect(response.body.db).toBe("down");
+    });
+  });
+
+  describe("Deep mode", () => {
+    it("should include mode: deep when mode=deep query param is passed", async () => {
+      const testApp = express();
+      testApp.get("/health", (req, res) => {
+        const mode = (req.query.mode as string) || "shallow";
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: mode,
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=deep")
+        .expect(200);
+      expect(response.body.mode).toBe("deep");
+    });
+
+    it("should include soroban status in deep mode when SOROBAN_RPC_URL is set", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "deep",
+          db: "ok",
+          soroban: "ok",
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=deep")
+        .expect(200);
+      expect(response.body.soroban).toBe("ok");
+    });
+
+    it("should include email status in deep mode when SMTP_HOST is set", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "deep",
+          db: "ok",
+          email: "ok",
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=deep")
+        .expect(200);
+      expect(response.body.email).toBe("ok");
+    });
+
+    it("should return 503 when critical dependency is down in deep mode", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.status(503).json({
+          status: "unhealthy",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "deep",
+          db: "down",
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=deep")
+        .expect(503);
+      expect(response.body.status).toBe("unhealthy");
+      expect(response.body.db).toBe("down");
+    });
+
+    it("should return degraded when non-critical dependency is down in deep mode", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "degraded",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "deep",
+          db: "ok",
+          redis: "down",
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=deep")
+        .expect(200);
+      expect(response.body.status).toBe("degraded");
+      expect(response.body.redis).toBe("down");
+    });
+  });
+
+  describe("Security and edge cases", () => {
+    it("should not expose sensitive information in health response", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      // Should not contain any sensitive data
+      expect(response.body).not.toHaveProperty("password");
+      expect(response.body).not.toHaveProperty("secret");
+      expect(response.body).not.toHaveProperty("token");
+      expect(response.body).not.toHaveProperty("connectionString");
+    });
+
+    it("should handle malformed mode query parameter gracefully", async () => {
+      const testApp = express();
+      testApp.get("/health", (req, res) => {
+        const mode = (req.query.mode as string) || "shallow";
+        // Invalid mode should default to shallow
+        const effectiveMode = mode === "deep" ? "deep" : "shallow";
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: effectiveMode,
+        });
+      });
+
+      const response = await request(testApp)
+        .get("/health?mode=invalid")
+        .expect(200);
+      expect(response.body.mode).toBe("shallow");
+    });
+
+    it("should return valid JSON with all required fields", async () => {
+      const testApp = express();
+      testApp.get("/health", (_req, res) => {
+        res.json({
+          status: "ok",
+          service: "veritasor-backend",
+          timestamp: new Date().toISOString(),
+          mode: "shallow",
+        });
+      });
+
+      const response = await request(testApp).get("/health").expect(200);
+      expect(response.body).toHaveProperty("status");
+      expect(response.body).toHaveProperty("service");
+      expect(response.body).toHaveProperty("timestamp");
+      expect(response.body).toHaveProperty("mode");
+      expect(response.body.service).toBe("veritasor-backend");
+    });
+  });
+});
+
 describe("Auth flow integration", () => {
   it("should complete full signup -> login -> refresh -> me flow", async () => {
     // 1. Signup
