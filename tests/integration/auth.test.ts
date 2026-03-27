@@ -47,6 +47,9 @@ let tokenStore: Array<{
   expiresAt: string;
 }> = [];
 
+// Tracks rotated refresh tokens so replay attempts are rejected explicitly.
+let usedRefreshTokenStore = new Set<string>();
+
 let resetTokenStore: Array<{
   email: string;
   token: string;
@@ -143,6 +146,10 @@ function createMockAuthRouter() {
       return res.status(400).json({ error: "Missing refresh token" });
     }
 
+    if (usedRefreshTokenStore.has(refreshToken)) {
+      return res.status(401).json({ error: "Invalid refresh token" });
+    }
+
     const tokenEntry = tokenStore.find((t) => t.refreshToken === refreshToken);
 
     if (!tokenEntry) {
@@ -151,6 +158,9 @@ function createMockAuthRouter() {
 
     const newAccessToken = `access_${tokenEntry.userId}_${Date.now()}`;
     const newRefreshToken = `refresh_${tokenEntry.userId}_${Date.now()}`;
+
+    // Mark the old token as consumed so any replay attempt is rejected.
+    usedRefreshTokenStore.add(refreshToken);
 
     // Remove old token
     tokenStore = tokenStore.filter((t) => t.refreshToken !== refreshToken);
@@ -292,6 +302,7 @@ beforeEach(() => {
   // Clear stores before each test
   userStore = [];
   tokenStore = [];
+  usedRefreshTokenStore = new Set<string>();
   resetTokenStore = [];
 });
 
@@ -449,6 +460,31 @@ describe("POST /api/auth/refresh", () => {
       .expect(401);
 
     expect(response.body.error).toMatch(/invalid refresh token/i);
+  });
+
+  it("should reject a replayed refresh token while allowing the rotated token", async () => {
+    const firstRefreshResponse = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken })
+      .expect(200);
+
+    const rotatedRefreshToken = firstRefreshResponse.body.refreshToken;
+
+    const replayResponse = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken })
+      .expect(401);
+
+    expect(replayResponse.body.error).toMatch(/invalid refresh token/i);
+
+    const rotatedTokenResponse = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: rotatedRefreshToken })
+      .expect(200);
+
+    expect(rotatedTokenResponse.body).toHaveProperty("accessToken");
+    expect(rotatedTokenResponse.body).toHaveProperty("refreshToken");
+    expect(rotatedTokenResponse.body.refreshToken).not.toBe(rotatedRefreshToken);
   });
 });
 
@@ -692,6 +728,38 @@ describe("Auth flow integration", () => {
       .expect(200);
 
     expect(loginResponse.body.user.email).toBe(testUser2.email);
+  });
+
+  it("should preserve the active session when an attacker replays a rotated refresh token", async () => {
+    const signupResponse = await request(app)
+      .post("/api/auth/signup")
+      .send(testUser2)
+      .expect(201);
+
+    const originalRefreshToken = signupResponse.body.refreshToken;
+
+    const legitimateRefreshResponse = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: originalRefreshToken })
+      .expect(200);
+
+    const rotatedAccessToken = legitimateRefreshResponse.body.accessToken;
+    const rotatedRefreshToken = legitimateRefreshResponse.body.refreshToken;
+
+    await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: originalRefreshToken })
+      .expect(401);
+
+    await request(app)
+      .get("/api/auth/me")
+      .set("Authorization", `Bearer ${rotatedAccessToken}`)
+      .expect(200);
+
+    await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: rotatedRefreshToken })
+      .expect(200);
   });
 
   it("should complete full forgot-password -> reset-password -> login flow", async () => {
