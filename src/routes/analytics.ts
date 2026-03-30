@@ -24,16 +24,7 @@ import { revenueReportQuerySchema } from '../services/analytics/revenueReportSch
 
 export const analyticsRouter = Router()
 
-/**
- * GET /api/analytics/periods
- *
- * Returns the sorted list of distinct billing periods for which the
- * authenticated business has at least one attestation.
- *
- * @auth requireBusinessAuth
- * @response 200 { periods: string[] }
- */
-analyticsRouter.get('/periods', requireBusinessAuth, (_req: Request, res: Response) => {
+analyticsRouter.get('/periods', requireBusinessAuth, ( req, res ) => {
   const businessId = res.locals.businessId as string
   const periods = listAttestedPeriodsForBusiness(businessId)
   res.json({ periods })

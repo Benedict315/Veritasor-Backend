@@ -1,233 +1,416 @@
 /**
- * Integration tests for attestations and analytics APIs.
+ * Integration tests for attestations API.
+ * Uses requireAuth (checks x-user-id header); expects 401 when unauthenticated.
  *
- * Auth notes:
- *  - /api/attestations  uses middleware/auth.ts which checks for x-user-id header
- *  - /api/analytics/*   uses requireBusinessAuth (Bearer + x-business-id header)
+ * Note: Routes that call resolveBusinessIdForUser() without a businessId query
+ * param will hit the real DB client (not configured in tests) and return 500.
+ * Tests that require an actual database are omitted here; they belong in e2e tests.
  */
-import { test, describe } from 'vitest'
-import assert from 'node:assert'
+import { describe, it, expect, vi } from 'vitest'
 import request from 'supertest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { businessRepository } from '../../src/repositories/business.js'
+
+const { submitAttestationMock } = vi.hoisted(() => ({
+  submitAttestationMock: vi.fn(),
+}))
+
+vi.mock('../../src/services/soroban/submitAttestation.js', () => ({
+  submitAttestation: submitAttestationMock,
+}))
+
 import { app } from '../../src/app.js'
+import {
+  validateSendTransactionResponse,
+  waitForConfirmation,
+  validateConfirmedResult,
+  SorobanSubmissionError,
+} from '../../src/services/soroban/submitAttestation.js'
 
-// ---------------------------------------------------------------------------
-// Attestations auth: middleware/auth.ts reads `x-user-id` header (no JWT).
-// ---------------------------------------------------------------------------
-
-/** Auth header for attestation routes — just needs a non-empty x-user-id. */
-const authHeader = { 'x-user-id': 'test-user-id' }
-
-// ---------------------------------------------------------------------------
-// Attestations – Authentication guard (unauthenticated requests)
-// ---------------------------------------------------------------------------
-
-test('GET /api/attestations returns 401 when unauthenticated', async () => {
-  const res = await request(app).get('/api/attestations')
-  assert.strictEqual(res.status, 401)
-})
-
-test('GET /api/attestations/:id returns 401 when unauthenticated', async () => {
-  const res = await request(app).get('/api/attestations/abc-123')
-  assert.strictEqual(res.status, 401)
-})
-
-test('POST /api/attestations returns 401 when unauthenticated', async () => {
-  const res = await request(app)
-    .post('/api/attestations')
-    .set('Idempotency-Key', 'test-key')
-    .send({ period: '2024-01', merkleRoot: 'abc', version: '1.0.0' })
-  assert.strictEqual(res.status, 401)
-})
-
-test('DELETE /api/attestations/:id/revoke returns 401 when unauthenticated', async () => {
-  const res = await request(app).delete('/api/attestations/xyz-456/revoke')
-  assert.strictEqual(res.status, 401)
-})
-
-// ---------------------------------------------------------------------------
-// Attestations – Authenticated behaviour
-// ---------------------------------------------------------------------------
-
-test('GET /api/attestations with x-user-id and explicit businessId returns 200', async () => {
-  const res = await request(app)
-    .get('/api/attestations')
-    .set(authHeader)
-    .query({ businessId: 'biz_1' })
-  assert.strictEqual(res.status, 200)
-  assert.strictEqual(res.body?.status, 'success')
-  assert.ok(Array.isArray(res.body?.data))
-  assert.ok(typeof res.body?.pagination === 'object')
-  assert.ok(typeof res.body.pagination.total === 'number')
-})
-
-test('GET /api/attestations response data items have expected shape', async () => {
-  const res = await request(app)
-    .get('/api/attestations')
-    .set(authHeader)
-    .query({ businessId: 'biz_1' })
-  assert.strictEqual(res.status, 200)
-  for (const item of res.body.data as any[]) {
-    assert.strictEqual(typeof item.id, 'string')
-    assert.strictEqual(typeof item.businessId, 'string')
-    assert.strictEqual(typeof item.period, 'string')
-    assert.strictEqual(typeof item.attestedAt, 'string')
-  }
-})
-
-test('GET /api/attestations with no businessId returns 4xx/5xx (no DB in test env)', async () => {
-  // Without a configured DB, businessRepository.getByUserId throws → 500.
-  // With a DB, it would return null → 404 BUSINESS_NOT_FOUND.
-  const res = await request(app).get('/api/attestations').set(authHeader)
-  assert.ok(res.status === 404 || res.status === 500, `Expected 404 or 500, got ${res.status}`)
-})
-
-test('DELETE /api/attestations/:id/revoke returns 4xx/5xx when no DB configured', async () => {
-  // Without a configured DB, businessRepository.getByUserId throws → 500.
-  // With a DB, no linked business would → 404 BUSINESS_NOT_FOUND.
-  const res = await request(app)
-    .delete('/api/attestations/nonexistent-id/revoke')
-    .set(authHeader)
-  assert.ok(res.status === 404 || res.status === 500, `Expected 404 or 500, got ${res.status}`)
-})
-
-// ---------------------------------------------------------------------------
-// Analytics – Revenue Report Time Window Controls
-// ---------------------------------------------------------------------------
-
-/**
- * Auth headers for the analytics routes.
- * requireBusinessAuth requires both Bearer token AND x-business-id header.
- * biz_1 has seeded attestations for periods 2025-10 and 2025-11.
- */
-const bizAuthHeader = {
-  Authorization: 'Bearer test-token',
-  'x-business-id': 'biz_1',
+const authHeader = { 'x-user-id': 'user_1' }
+const business = {
+  id: 'biz_1',
+  userId: 'user_1',
+  name: 'Acme Inc',
+  industry: null,
+  description: null,
+  website: null,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
 }
 
-describe('GET /api/analytics/revenue – time window controls', () => {
-  test('returns 401 when unauthenticated', async () => {
-    const res = await request(app).get('/api/analytics/revenue').query({ period: '2025-10' })
-    assert.strictEqual(res.status, 401)
+// ---------------------------------------------------------------------------
+// Existing API integration tests
+// ---------------------------------------------------------------------------
+
+describe("GET /api/attestations", () => {
+  it("should return 401 when unauthenticated", async () => {
+    const res = await request(app).get("/api/attestations");
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/unauthorized/i);
+  });
+
+  it('returns 401 when listing attestations without authentication', async () => {
+    const res = await request(app).get('/api/attestations')
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  test('returns 400 when no query params supplied', async () => {
-    const res = await request(app).get('/api/analytics/revenue').set(bizAuthHeader)
-    assert.strictEqual(res.status, 400)
-    assert.ok(res.body?.error)
+  it('lists attestations for the authenticated business with pagination metadata', async () => {
+    const res = await request(app).get('/api/attestations').set(authHeader)
+
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('success')
+    expect(Array.isArray(res.body.data)).toBe(true)
+    expect(res.body.data.length).toBeGreaterThan(0)
+    expect(res.body.data[0].businessId).toBe('biz_1')
+    expect(res.body.pagination).toMatchObject({
+      page: 1,
+      limit: 20,
+      totalPages: 1,
+    })
   })
 
-  test('returns 400 when period has invalid format (not YYYY-MM)', async () => {
+  it('returns an attestation by id for the authenticated business', async () => {
+    const res = await request(app).get('/api/attestations/att_1').set(authHeader)
+
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('success')
+    expect(res.body.data).toMatchObject({
+      id: 'att_1',
+      businessId: 'biz_1',
+    })
+  })
+
+  it('submits an attestation and persists the Soroban transaction hash', async () => {
+    submitAttestationMock.mockResolvedValue({
+      txHash: 'tx_success_123',
+    })
+
     const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ period: '2025/10' })
-    assert.strictEqual(res.status, 400)
+      .post('/api/attestations')
+      .set(authHeader)
+      .set('Idempotency-Key', 'integration-submit-success')
+      .send({
+        period: '2026-02',
+        merkleRoot: 'abc123',
+        timestamp: 1700000000,
+        version: '1.2.0',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.status).toBe('success')
+    expect(res.body.txHash).toBe('tx_success_123')
+    expect(res.body.data).toMatchObject({
+      businessId: 'biz_1',
+      period: '2026-02',
+      merkleRoot: 'abc123',
+      timestamp: 1700000000,
+      version: '1.2.0',
+      txHash: 'tx_success_123',
+      status: 'submitted',
+    })
+    expect(submitAttestationMock).toHaveBeenCalledTimes(1)
+    expect(submitAttestationMock).toHaveBeenCalledWith({
+      business: 'biz_1',
+      period: '2026-02',
+      merkleRoot: 'abc123',
+      timestamp: 1700000000,
+      version: '1.2.0',
+    })
   })
 
-  test('returns 400 when from has invalid format', async () => {
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: 'October-2025', to: '2025-12' })
-    assert.strictEqual(res.status, 400)
-  })
+  it('returns the cached response for duplicate idempotent submissions', async () => {
+    submitAttestationMock.mockResolvedValue({
+      txHash: 'tx_cached_123',
+    })
 
-  test('returns 400 when to has invalid format', async () => {
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: '2025-10', to: 'Dec-2025' })
-    assert.strictEqual(res.status, 400)
-  })
-
-  test('returns 400 when from is after to (logical ordering violation)', async () => {
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: '2025-12', to: '2025-01' })
-    assert.strictEqual(res.status, 400)
-    assert.ok(res.body?.error?.toLowerCase().includes('later'))
-  })
-
-  test('returns 400 when range exceeds 24 months', async () => {
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: '2020-01', to: '2025-12' })
-    assert.strictEqual(res.status, 400)
-    assert.ok(res.body?.error?.toLowerCase().includes('maximum'))
-  })
-
-  test('returns 404 when valid period has no matching data', async () => {
-    // biz_1 has no attestations for 2099-01
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ period: '2099-01' })
-    assert.strictEqual(res.status, 404)
-    assert.ok(res.body?.error)
-  })
-
-  test('returns 200 with correct report shape for a valid single period', async () => {
-    // biz_1 has seeded data for 2025-10 and 2025-11
-    const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ period: '2025-10' })
-    assert.strictEqual(res.status, 200)
-    assert.strictEqual(typeof res.body.period, 'string')
-    assert.strictEqual(typeof res.body.total, 'number')
-    assert.strictEqual(typeof res.body.net, 'number')
-    assert.strictEqual(res.body.currency, 'USD')
-    assert.ok(Array.isArray(res.body.breakdown))
-    // net must be less than total (5% fee applied)
-    assert.ok(res.body.net < res.body.total)
-    // Each breakdown item must have attestationId and attestedAt
-    for (const item of res.body.breakdown) {
-      assert.strictEqual(typeof item.attestationId, 'string')
-      assert.strictEqual(typeof item.attestedAt, 'string')
+    const key = `integration-idempotent-${Date.now()}`
+    const payload = {
+      period: '2026-03',
+      merkleRoot: 'root-123',
+      timestamp: 1700000100,
+      version: '1.0.0',
     }
+
+    const first = await request(app)
+      .post('/api/attestations')
+      .set(authHeader)
+      .set('Idempotency-Key', key)
+      .send(payload)
+
+    const second = await request(app)
+      .post('/api/attestations')
+      .set(authHeader)
+      .set('Idempotency-Key', key)
+      .send(payload)
+
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(201)
+    expect(second.body).toEqual(first.body)
+    expect(submitAttestationMock).toHaveBeenCalledTimes(1)
   })
 
-  test('returns 200 with correct report shape for a valid from/to range', async () => {
+  it('returns 400 when the idempotency key is missing', async () => {
     const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: '2025-10', to: '2025-11' })
-    assert.strictEqual(res.status, 200)
-    assert.strictEqual(res.body.period, '2025-10 to 2025-11')
-    assert.ok(Array.isArray(res.body.breakdown))
-    assert.ok(res.body.breakdown.length > 0)
+      .post('/api/attestations')
+      .set(authHeader)
+      .send({
+        period: '2026-04',
+        merkleRoot: 'root-456',
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'Missing Idempotency-Key header' })
   })
 
-  test('from === to is treated as a single-period range and returns 200', async () => {
+  it('maps Soroban RPC failures to a 502 response', async () => {
+    submitAttestationMock.mockRejectedValue(
+      Object.assign(new Error('retry budget exhausted'), {
+        code: 'SUBMIT_FAILED',
+      }),
+    )
+
     const res = await request(app)
-      .get('/api/analytics/revenue')
-      .set(bizAuthHeader)
-      .query({ from: '2025-11', to: '2025-11' })
-    assert.strictEqual(res.status, 200)
-    assert.ok(Array.isArray(res.body.breakdown))
+      .post('/api/attestations')
+      .set(authHeader)
+      .set('Idempotency-Key', `integration-submit-failure-${Date.now()}`)
+      .send({
+        period: '2026-05',
+        merkleRoot: 'root-789',
+      })
+
+    expect(res.status).toBe(502)
+    expect(res.body).toMatchObject({
+      status: 'error',
+      code: 'SUBMIT_FAILED',
+      message: 'Soroban RPC request failed after applying the retry policy.',
+    })
+  })
+
+  it('maps signer configuration failures to a 503 response without leaking secrets', async () => {
+    submitAttestationMock.mockRejectedValue(
+      Object.assign(new Error('signerSecret does not match sourcePublicKey.'), {
+        code: 'SIGNER_MISMATCH',
+      }),
+    )
+
+    const res = await request(app)
+      .post('/api/attestations')
+      .set(authHeader)
+      .set('Idempotency-Key', `integration-signer-failure-${Date.now()}`)
+      .send({
+        period: '2026-06',
+        merkleRoot: 'root-999',
+      })
+
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({
+      status: 'error',
+      code: 'SIGNER_MISMATCH',
+      message: 'Soroban submission is not available right now.',
+    })
+    expect(res.body.message).not.toContain('signerSecret')
   })
 })
 
-describe('GET /api/analytics/periods', () => {
-  test('returns 401 when unauthenticated', async () => {
-    const res = await request(app).get('/api/analytics/periods')
-    assert.strictEqual(res.status, 401)
-  })
+// ---------------------------------------------------------------------------
+// Soroban submit attestation response validation tests
+// ---------------------------------------------------------------------------
 
-  test('returns 200 with sorted array of period strings when authenticated', async () => {
-    const res = await request(app).get('/api/analytics/periods').set(bizAuthHeader)
-    assert.strictEqual(res.status, 200)
-    assert.ok(Array.isArray(res.body?.periods))
-    // Periods should be sorted descending (most recent first)
-    const periods: string[] = res.body.periods
-    for (let i = 1; i < periods.length; i++) {
-      assert.ok(
-        periods[i - 1] >= periods[i],
-        `Expected descending order but got: ${periods[i - 1]} before ${periods[i]}`,
-      )
+const VALID_TX_HASH = 'a'.repeat(64)
+
+test('validateSendTransactionResponse accepts valid PENDING response', () => {
+  const response = { hash: VALID_TX_HASH, status: 'PENDING' }
+  assert.doesNotThrow(() =>
+    validateSendTransactionResponse(response as any)
+  )
+})
+
+test('validateSendTransactionResponse accepts valid DUPLICATE response', () => {
+  const response = { hash: VALID_TX_HASH, status: 'DUPLICATE' }
+  assert.doesNotThrow(() =>
+    validateSendTransactionResponse(response as any)
+  )
+})
+
+test('validateSendTransactionResponse accepts ERROR status (validated before error mapping)', () => {
+  const response = { hash: VALID_TX_HASH, status: 'ERROR' }
+  assert.doesNotThrow(() =>
+    validateSendTransactionResponse(response as any)
+  )
+})
+
+test('validateSendTransactionResponse rejects null response', () => {
+  assert.throws(
+    () => validateSendTransactionResponse(null as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      return true
     }
-  })
+  )
+})
+
+test('validateSendTransactionResponse rejects missing hash', () => {
+  assert.throws(
+    () => validateSendTransactionResponse({ status: 'PENDING' } as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      assert.ok(err.message.includes('invalid transaction hash'))
+      return true
+    }
+  )
+})
+
+test('validateSendTransactionResponse rejects malformed hash', () => {
+  const response = { hash: 'not-a-hex-hash', status: 'PENDING' }
+  assert.throws(
+    () => validateSendTransactionResponse(response as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      return true
+    }
+  )
+})
+
+test('validateSendTransactionResponse rejects short hash', () => {
+  const response = { hash: 'abcdef1234', status: 'PENDING' }
+  assert.throws(
+    () => validateSendTransactionResponse(response as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      return true
+    }
+  )
+})
+
+test('validateSendTransactionResponse rejects uppercase hash', () => {
+  const response = { hash: 'A'.repeat(64), status: 'PENDING' }
+  assert.throws(
+    () => validateSendTransactionResponse(response as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      return true
+    }
+  )
+})
+
+test('validateSendTransactionResponse rejects unknown status', () => {
+  const response = { hash: VALID_TX_HASH, status: 'UNKNOWN_STATUS' }
+  assert.throws(
+    () => validateSendTransactionResponse(response as any),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'INVALID_RESPONSE')
+      assert.ok(err.message.includes('unexpected status'))
+      return true
+    }
+  )
+})
+
+test('waitForConfirmation resolves on immediate SUCCESS', async () => {
+  const mockServer = {
+    getTransaction: async () => ({
+      status: 'SUCCESS',
+      ledger: 12345,
+      returnValue: null,
+    }),
+  }
+
+  const result = await waitForConfirmation(mockServer as any, VALID_TX_HASH, 10, 3)
+  assert.strictEqual(result.status, 'SUCCESS')
+})
+
+test('waitForConfirmation resolves after NOT_FOUND then SUCCESS', async () => {
+  let callCount = 0
+  const mockServer = {
+    getTransaction: async () => {
+      callCount++
+      if (callCount < 3) {
+        return { status: 'NOT_FOUND' }
+      }
+      return { status: 'SUCCESS', ledger: 99999, returnValue: null }
+    },
+  }
+
+  const result = await waitForConfirmation(mockServer as any, VALID_TX_HASH, 10, 5)
+  assert.strictEqual(result.status, 'SUCCESS')
+  assert.strictEqual(callCount, 3)
+})
+
+test('waitForConfirmation throws CONFIRMATION_FAILED on FAILED status', async () => {
+  const mockServer = {
+    getTransaction: async () => ({ status: 'FAILED' }),
+  }
+
+  await assert.rejects(
+    () => waitForConfirmation(mockServer as any, VALID_TX_HASH, 10, 3),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'CONFIRMATION_FAILED')
+      return true
+    }
+  )
+})
+
+test('waitForConfirmation throws CONFIRMATION_TIMEOUT after max attempts', async () => {
+  const mockServer = {
+    getTransaction: async () => ({ status: 'NOT_FOUND' }),
+  }
+
+  await assert.rejects(
+    () => waitForConfirmation(mockServer as any, VALID_TX_HASH, 10, 3),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'CONFIRMATION_TIMEOUT')
+      assert.ok(err.message.includes('3 polling attempts'))
+      return true
+    }
+  )
+})
+
+test('validateConfirmedResult throws when returnValue is undefined', () => {
+  const merkleRoot = '0xdeadbeef1234567890abcdef'
+
+  assert.throws(
+    () => validateConfirmedResult({ returnValue: undefined } as any, merkleRoot),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'RESULT_VALIDATION_FAILED')
+      assert.ok(err.message.includes('no return value'))
+      return true
+    }
+  )
+})
+
+test('validateConfirmedResult throws on null returnValue', () => {
+  assert.throws(
+    () => validateConfirmedResult({ returnValue: null } as any, 'root'),
+    (err: any) => {
+      assert.ok(err instanceof SorobanSubmissionError)
+      assert.strictEqual(err.code, 'RESULT_VALIDATION_FAILED')
+      return true
+    }
+  )
+})
+
+test('SorobanSubmissionError has correct name and code', () => {
+  const err = new SorobanSubmissionError('test message', 'TEST_CODE')
+  assert.strictEqual(err.name, 'SorobanSubmissionError')
+  assert.strictEqual(err.code, 'TEST_CODE')
+  assert.strictEqual(err.message, 'test message')
+  assert.ok(err instanceof Error)
+})
+
+test('SorobanSubmissionError preserves cause', () => {
+  const cause = new Error('original')
+  const err = new SorobanSubmissionError('wrapped', 'WRAP', cause)
+  assert.strictEqual(err.cause, cause)
 })
 

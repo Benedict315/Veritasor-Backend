@@ -21,6 +21,7 @@ import {
 } from "../../src/services/auth/signup.js";
 import {
   resetSignupRateLimitStore,
+  getSignupRateLimitStore,
   createSignupRateLimitStore,
   getSignupRateLimitStore,
 } from "../../src/utils/signupRateLimiter.js";
@@ -233,20 +234,14 @@ describe("Signup Service - Abuse Prevention", () => {
     });
 
     it("should reject common weak passwords", async () => {
-      // "Password123!" is structurally valid (upper, lower, number, special) but
-      // is widely considered a common password. The service currently enforces
-      // structural rules only — a common-password blocklist is not yet implemented.
-      // This test verifies the service rejects it when a blocklist IS provided via
-      // config, or that it passes through with a PASSWORD_WEAK error if the
-      // password fails structural checks. For now we assert the structural validator
-      // accepts it (no throw), since "Password123!" meets all structural criteria.
-      const result = await signup({
-        email: `weakpwd${Date.now()}@example.com`,
-        password: "Password123!",
-        ipAddress: "192.168.1.1",
-      });
-      expect(result).toBeDefined();
-      await deleteUser(result.user.id);
+      // SignupError message is generic; the "too common" reason is in .details
+      await expect(
+        signup({
+          email: "user@example.com",
+          password: "Password123!",
+          ipAddress: "192.168.1.1",
+        }),
+      ).rejects.toThrow("Password does not meet security requirements");
     });
   });
 
@@ -592,12 +587,10 @@ describe("Auth Router - Signup Endpoint", () => {
     it("should show limited availability after max attempts", async () => {
       const ip = "192.168.1.51";
 
-      // Record attempts directly against the global singleton so that
-      // checkSignupAvailability (which also uses the global singleton) sees them.
-      resetSignupRateLimitStore();
-      const globalStore = getSignupRateLimitStore({ maxAttemptsPerIp: 2 });
-      globalStore.recordAttempt(ip, "user1@example.com");
-      globalStore.recordAttempt(ip, "user2@example.com");
+      const rateLimiter = getSignupRateLimitStore({ maxAttemptsPerIp: 2 });
+
+      rateLimiter.recordAttempt(ip, "user1@example.com");
+      rateLimiter.recordAttempt(ip, "user2@example.com");
 
       const availability = checkSignupAvailability(ip, "user3@example.com", {
         maxAttemptsPerIp: 2,
