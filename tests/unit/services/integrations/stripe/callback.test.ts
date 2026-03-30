@@ -3,7 +3,10 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { handleCallback } from '../../../../../src/services/integrations/stripe/callback.js'
+import {
+  handleCallback,
+  isValidStripeOAuthState
+} from '../../../../../src/services/integrations/stripe/callback.js'
 import * as store from '../../../../../src/services/integrations/stripe/store.js'
 import * as IntegrationRepository from '../../../../../src/repositories/integration.js'
 
@@ -14,7 +17,7 @@ vi.mock('../../../../../src/repositories/integration.js')
 describe('Stripe OAuth Callback Service', () => {
   const mockUserId = 'user-123'
   const mockCode = 'auth-code-xyz'
-  const mockState = 'state-token-abc'
+  const mockState = 'a'.repeat(64)
   const mockStripeUserId = 'acct_stripe123'
   
   beforeEach(() => {
@@ -69,6 +72,26 @@ describe('Stripe OAuth Callback Service', () => {
   })
   
   describe('State Token Validation', () => {
+    it('accepts only 64-char lowercase hex state values', () => {
+      expect(isValidStripeOAuthState('a'.repeat(64))).toBe(true)
+      expect(isValidStripeOAuthState('A'.repeat(64))).toBe(false)
+      expect(isValidStripeOAuthState('a'.repeat(63))).toBe(false)
+      expect(isValidStripeOAuthState('z'.repeat(64))).toBe(false)
+      expect(isValidStripeOAuthState('a'.repeat(64) + ' ')).toBe(false)
+    })
+
+    it('should return error when state token format is malformed', async () => {
+      const result = await handleCallback(
+        { code: mockCode, state: 'not-hex' },
+        mockUserId
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.error).toBe('Invalid OAuth state format')
+      expect(store.consumeOAuthState).not.toHaveBeenCalled()
+      expect(global.fetch).not.toHaveBeenCalled()
+    })
+
     it('should return error when state token is invalid', async () => {
       vi.mocked(store.consumeOAuthState).mockReturnValue(false)
       
@@ -86,7 +109,7 @@ describe('Stripe OAuth Callback Service', () => {
       vi.mocked(store.consumeOAuthState).mockReturnValue(false)
       
       const result = await handleCallback(
-        { code: mockCode, state: 'expired-state' },
+        { code: mockCode, state: 'b'.repeat(64) },
         mockUserId
       )
       
@@ -145,6 +168,27 @@ describe('Stripe OAuth Callback Service', () => {
       
       expect(result.success).toBe(false)
       expect(result.error).toBe('No access token in response')
+    })
+
+    it('should return error when Stripe response is missing stripe_user_id', async () => {
+      vi.mocked(global.fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: 'sk_test_token123',
+          scope: 'read_write',
+          token_type: 'bearer'
+        })
+      } as Response)
+
+      const result = await handleCallback(
+        { code: mockCode, state: mockState },
+        mockUserId
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.error).toBe('No Stripe account ID in response')
+      expect(IntegrationRepository.create).not.toHaveBeenCalled()
+      expect(IntegrationRepository.update).not.toHaveBeenCalled()
     })
     
     it('should make correct token exchange request to Stripe', async () => {
