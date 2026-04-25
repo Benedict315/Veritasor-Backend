@@ -49,6 +49,7 @@ The integrations integration tests cover:
 4. **Disconnect Integration** - Remove integration connection
 5. **Authentication** - Protected routes return 401 when unauthenticated
 6. **Razorpay Webhook Handler** - Signature validation and idempotent processing for Razorpay webhooks
+7. **Shopify Disconnect** - Remote token revocation and local datastore consistency
 
 ### Razorpay Webhook Tests
 
@@ -84,6 +85,32 @@ The Razorpay webhook tests ensure secure and reliable webhook processing:
 - **Replay / Duplicate Delivery**: Duplicate webhook deliveries are expected and must be idempotent. Future-dated payloads are rejected to reduce clock-skew abuse and obvious replay tampering.
 - **Integrations**: Verification failures from upstream providers should not leak provider-side error detail back to clients. Tests should keep asserting sanitized responses and single-write behavior.
 - **Security**: Sensitive tokens must not be exposed in responses.
+
+### Shopify Disconnect Tests
+
+The Shopify disconnect tests ensure safe app removal and consistent local state:
+
+- **Remote revocation first**: Calls Shopify app revocation before deleting local integration records
+- **Local consistency**: Deletes local integration only after successful upstream revoke
+- **Partial failure handling**: Keeps local state when upstream revoke fails, surfaces `502 Bad Gateway`
+- **Already-revoked resilience**: Treats `401`, `403`, and `404` from Shopify as successful disconnects and still removes local records
+- **Token cleanup**: Removes stored Shopify access tokens after disconnect
+
+**Environment Variables:**
+- `SHOPIFY_CLIENT_ID`
+- `SHOPIFY_CLIENT_SECRET`
+- `SHOPIFY_REDIRECT_URI`
+- `SHOPIFY_SUCCESS_REDIRECT` (optional)
+
+**Failure Modes:**
+- Upstream revocation failure: 502 Bad Gateway
+- Local deletion failure after upstream revoke: 500 Internal Server Error
+- Missing revocation metadata: 500 Internal Server Error
+
+**Operator Notes:**
+- Use durable storage for local integration records and token state. In-memory token state is only acceptable for tests and prototypes.
+- Do not delete local integration records before verifying upstream revocation; otherwise, you may leave orphaned app installations and webhook registrations.
+- Log disconnect attempts with structured context and avoid logging raw tokens.
 
 ### Mock Implementation
 
