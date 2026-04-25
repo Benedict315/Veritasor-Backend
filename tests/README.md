@@ -161,37 +161,42 @@ The CORS tests verify the `createCorsMiddleware()` behaviour from `src/middlewar
 | `ALLOWED_ORIGINS` unset + development | `"*"` |
 | Extra whitespace / trailing commas | Trimmed, empty segments removed |
 
-## CORS Environment Variables
+## Configuration Environment Variables
+
+The application uses Zod for strict runtime validation of environment variables. If any required variable is missing or invalid, the application will **fail fast** at startup.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ALLOWED_ORIGINS` | **Production: yes** | Dev: `*` (all); Prod: `[]` (none) | Comma-separated list of allowed origins (e.g. `https://app.example.com,https://admin.example.com`). In production, startup fails if this is empty/unset. |
+| `NODE_ENV` | No | `development` | Environment mode (`development`, `production`, `test`). |
+| `DATABASE_URL` | **Yes** | - | PostgreSQL connection string (e.g. `postgres://user:pass@localhost:5432/db`). |
+| `JWT_SECRET` | **Prod: yes** | Dev: fallback | Secret key for JWT signing. In production, must be at least 32 characters. |
+| `ALLOWED_ORIGINS` | **Prod: yes** | Dev: `*` | Comma-separated list of allowed CORS origins. |
+| `STELLAR_NETWORK` | No | `testnet` | Stellar network (`testnet`, `public`, `futurenet`). |
+| `SOROBAN_RPC_URL` | No | Testnet URL | Soroban RPC endpoint. |
+| `SOROBAN_CONTRACT_ID` | No | - | Deployed attestation contract address (C...). |
 
 ### Behaviour by environment
 
-| Environment | `ALLOWED_ORIGINS` set | `ALLOWED_ORIGINS` unset |
-|---|---|---|
-| `development` | Uses provided list | Allows all origins (`*`), credentials disabled |
-| `production` | Uses provided list, credentials enabled | **Startup fails** — explicit allowlist required |
+- **Development**: Missing `JWT_SECRET` triggers a warning and uses an unsafe default secret. Missing `DATABASE_URL` causes startup failure.
+- **Production**: Missing `ALLOWED_ORIGINS` or a weak `JWT_SECRET` (< 32 chars) causes immediate startup failure.
 
-## CORS Threat Model Notes
+## Threat Model Notes
 
-### Credential cookies
-`Access-Control-Allow-Credentials: true` is only sent when the origin is in the explicit allowlist. In wildcard mode, credentials are disabled per the CORS spec. This prevents ambient-authority attacks where a malicious site could piggyback on a user's session cookies.
+### Authentication & Secrets
+- **JWT Secrets**: The application enforces a minimum entropy requirement (32 chars) for `JWT_SECRET` in production to resist brute-force attacks.
+- **Dev Fallbacks**: While dev fallbacks are provided for ease of use, they are explicitly disabled in production mode to prevent accidental deployment with insecure defaults.
+- **Fail-Fast**: By validating configuration at the earliest possible stage (module import), we prevent the application from running in a partially-configured or insecure state.
 
-### Preflight caching
-Preflight responses include `Access-Control-Max-Age: 86400` (24 hours). This reduces latency from repeated OPTIONS round-trips. The cache is per-origin, per-method, per-headers tuple in the browser. If the allowlist changes, browsers may still use stale preflight results until the cache expires — this is acceptable because the server still validates the `Origin` header on the actual request.
+### Webhooks & Integrations
+- **URL Validation**: Integration endpoints (like `SOROBAN_RPC_URL`) are validated as proper URLs to prevent SSRF or misdirection via malformed config.
+- **Network Isolation**: `STELLAR_NETWORK` is strictly enforced to prevent accidentally connecting a production instance to a testnet contract or vice-versa.
 
-### Wildcard pitfalls
-- `Access-Control-Allow-Origin: *` cannot be combined with `credentials: true`. The middleware enforces this.
-- Wildcard is **only** used in non-production environments. Production always requires an explicit allowlist.
-- A common mistake is setting `ALLOWED_ORIGINS=*` in production — this is parsed as a single-element array `["*"]`, which will NOT match any real origin and will effectively block all CORS requests. This is the correct and safe behaviour.
+### CORS & Browser Security
+- **Explicit Allowlist**: Production environments require an explicit `ALLOWED_ORIGINS` list. Wildcards (`*`) are rejected in production to prevent unauthorized cross-origin access to sensitive data.
+- **Credential Protection**: Credentials (cookies/headers) are only allowed when a specific origin matches the allowlist, preventing ambient-authority exploitation.
 
-### Webhooks and integrations
-Incoming webhooks (e.g. Stripe, Shopify) are **server-to-server** and do not send an `Origin` header. They are unaffected by CORS restrictions. The middleware allows requests without an `Origin` header to pass through.
-
-### Observability
-Blocked origins emit a structured JSON log (`type: "cors_rejected"`) via the application logger. Monitor these logs in production to detect misconfigured frontends or potential attack probes.
+## Observability
+- **Structured Logs**: Configuration validation failures are logged as structured JSON errors via the internal `logger.error` utility, including specific details on which fields failed validation.
 
 ## End-to-End (E2E) Testing Plan
 
