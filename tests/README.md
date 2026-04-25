@@ -23,6 +23,7 @@ npm run test:coverage
   - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
 - `unit/` - Unit tests for individual modules
   - `cors.test.ts` - `getAllowedOrigins()` parsing and environment-specific behaviour
+  - `routeMap.test.ts` - Route map generation logic from Express router stack
 
 ## Test Setup
 
