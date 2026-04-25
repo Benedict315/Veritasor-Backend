@@ -19,7 +19,10 @@ npm run test:coverage
 
 - `integration/` - Integration tests that test complete API flows
   - `auth.test.ts` - Authentication API tests (signup, login, refresh, password reset)
+  - `cors.test.ts` - CORS middleware tests (allowlist, wildcard, preflight, credentials, logging)
   - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
+- `unit/` - Unit tests for individual modules
+  - `cors.test.ts` - `getAllowedOrigins()` parsing and environment-specific behaviour
 
 ## Test Setup
 
@@ -129,6 +132,65 @@ afterAll(async () => {
 - Verify security requirements (401, 403, etc.)
 - Test OAuth state validation and expiration
 - Ensure tokens and credentials are not leaked in responses
+
+## CORS Tests
+
+The CORS tests verify the `createCorsMiddleware()` behaviour from `src/middleware/cors.ts`.
+
+### Integration tests (`integration/cors.test.ts`)
+
+| Scenario | Assertion |
+|---|---|
+| Request from allowed origin | `Access-Control-Allow-Origin` matches the origin |
+| Request from disallowed origin | No `Access-Control-Allow-Origin` header |
+| Preflight (OPTIONS) from allowed origin | 204, correct methods, max-age, credentials |
+| Preflight from disallowed origin | No CORS headers |
+| No `Origin` header (same-origin) | Request succeeds normally |
+| Credentials with allowlist | `Access-Control-Allow-Credentials: true` |
+| Wildcard mode (dev) | Origin reflected, no credentials header |
+| Exposed headers | `X-Request-ID` in `Access-Control-Expose-Headers` |
+| Structured logging | `cors_rejected` log emitted for blocked origins |
+
+### Unit tests (`unit/cors.test.ts`)
+
+| Scenario | Expected |
+|---|---|
+| `ALLOWED_ORIGINS` set | Parsed array |
+| `ALLOWED_ORIGINS` unset + production | `[]` |
+| `ALLOWED_ORIGINS` unset + development | `"*"` |
+| Extra whitespace / trailing commas | Trimmed, empty segments removed |
+
+## CORS Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ALLOWED_ORIGINS` | **Production: yes** | Dev: `*` (all); Prod: `[]` (none) | Comma-separated list of allowed origins (e.g. `https://app.example.com,https://admin.example.com`). In production, startup fails if this is empty/unset. |
+
+### Behaviour by environment
+
+| Environment | `ALLOWED_ORIGINS` set | `ALLOWED_ORIGINS` unset |
+|---|---|---|
+| `development` | Uses provided list | Allows all origins (`*`), credentials disabled |
+| `production` | Uses provided list, credentials enabled | **Startup fails** — explicit allowlist required |
+
+## CORS Threat Model Notes
+
+### Credential cookies
+`Access-Control-Allow-Credentials: true` is only sent when the origin is in the explicit allowlist. In wildcard mode, credentials are disabled per the CORS spec. This prevents ambient-authority attacks where a malicious site could piggyback on a user's session cookies.
+
+### Preflight caching
+Preflight responses include `Access-Control-Max-Age: 86400` (24 hours). This reduces latency from repeated OPTIONS round-trips. The cache is per-origin, per-method, per-headers tuple in the browser. If the allowlist changes, browsers may still use stale preflight results until the cache expires — this is acceptable because the server still validates the `Origin` header on the actual request.
+
+### Wildcard pitfalls
+- `Access-Control-Allow-Origin: *` cannot be combined with `credentials: true`. The middleware enforces this.
+- Wildcard is **only** used in non-production environments. Production always requires an explicit allowlist.
+- A common mistake is setting `ALLOWED_ORIGINS=*` in production — this is parsed as a single-element array `["*"]`, which will NOT match any real origin and will effectively block all CORS requests. This is the correct and safe behaviour.
+
+### Webhooks and integrations
+Incoming webhooks (e.g. Stripe, Shopify) are **server-to-server** and do not send an `Origin` header. They are unaffected by CORS restrictions. The middleware allows requests without an `Origin` header to pass through.
+
+### Observability
+Blocked origins emit a structured JSON log (`type: "cors_rejected"`) via the application logger. Monitor these logs in production to detect misconfigured frontends or potential attack probes.
 
 ## End-to-End (E2E) Testing Plan
 
