@@ -19,6 +19,7 @@ npm run test:coverage
 
 - `integration/` - Integration tests that test complete API flows
   - `auth.test.ts` - Authentication API tests (signup, login, refresh, password reset)
+  - `signup-abuse-prevention.test.ts` - Signup abuse prevention, schema validation edge cases, idempotency, and timing-attack guards
   - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
 
 ## Test Setup
@@ -38,6 +39,68 @@ The auth integration tests cover:
 4. **Get Current User** - Fetching authenticated user info
 5. **Forgot Password** - Initiating password reset flow
 6. **Reset Password** - Completing password reset with token
+
+### Signup Abuse Prevention Tests
+
+`tests/integration/signup-abuse-prevention.test.ts` covers the hardened signup
+service end-to-end:
+
+- **Email validation** — format, normalization (lowercase + trim), TLD presence,
+  RFC 5321 max length (254 chars)
+- **Disposable email blocking** — exact match and case-insensitive match against
+  the curated list in `src/utils/abusePrevention.ts`
+- **Password strength** — length, character classes, common-password rejection,
+  populated `details` for client diagnostics
+- **Schema validation edge cases** — missing/null/undefined/non-string/empty/
+  whitespace-only inputs, all surfaced as `VALIDATION_ERROR` with actionable
+  `details`
+- **Honeypot detection** — silent rejection of bots that populate the `website`
+  field
+- **Rate limiting** — per-IP, per-email, and per-headers behavior
+- **Idempotency** — concurrent signups for the same email collapse to a single
+  successful user; remaining attempts return generic `EMAIL_EXISTS` errors
+  without leaking that the address already exists
+- **Timing-attack prevention** — consistent response time for existing vs.
+  non-existing emails
+
+#### Operator Notes
+
+- The signup service is in-memory; the rate limiter is a singleton process-wide
+  store that must be reset between tests via `resetSignupRateLimitStore()`.
+- All `SignupError` instances expose a typed `type` (`VALIDATION_ERROR`,
+  `EMAIL_INVALID`, `EMAIL_DISPOSABLE`, `EMAIL_EXISTS`, `PASSWORD_WEAK`,
+  `RATE_LIMITED`, `HONEYPOT_TRIGGERED`, `SUSPICIOUS_ACTIVITY`) plus optional
+  `details: string[]`. Clients should drive UI messaging from `type`, never
+  from the natural-language `message`.
+- Structured logs are emitted via `src/utils/logger.ts` for the events
+  `signup.validation_failed`, `signup.rate_limited`,
+  `signup.duplicate_email_attempt`, `signup.duplicate_email_race`,
+  `signup.success`, and `signup.unexpected_error`. None of them contain
+  passwords or full email addresses — only client IP and a stable event name.
+- Configuration toggles live in `DEFAULT_SIGNUP_SERVICE_CONFIG` and
+  `DEFAULT_ABUSE_PREVENTION_CONFIG`; tests pass overrides through the second
+  argument of `signup(...)`.
+
+#### Threat Model Notes (Auth)
+
+- **Email enumeration** — duplicate-email errors return `400` with a generic
+  message and never use `409 Conflict`, preventing trivial enumeration through
+  status-code or message inspection.
+- **Timing oracles** — every code path applies `addTimingDelay` to a minimum
+  operation time so an attacker cannot distinguish "user exists" from "user
+  does not exist" via response latency.
+- **Bot-driven signup floods** — a hidden honeypot field plus per-IP/per-email
+  rate limiting with progressive delays makes credential stuffing and free
+  account farming expensive.
+- **Race-condition idempotency** — the service double-checks the email index
+  immediately before insert. Concurrent signups racing on the same email
+  collapse safely to a single created user; the remaining requests receive the
+  same generic `EMAIL_EXISTS` shape as a sequential duplicate.
+- **DoS via heavy hashing** — passwords are bounded by `maxPasswordLength`
+  (default 128) before being passed to bcrypt to limit CPU per request.
+- **PII in logs** — the structured logger never receives the password, the
+  refresh token, or the access token. Email is intentionally omitted from log
+  payloads to limit blast radius if logs are exfiltrated.
 
 ## Integrations Tests
 
