@@ -16,9 +16,18 @@ import { integrationsShopifyRouter } from "./routes/integrations-shopify.js";
 import { integrationsStripeRouter } from "./routes/integrations-stripe.js";
 import usersRouter from "./routes/users.js";
 import { razorpayWebhookRouter } from "./routes/webhooks-razorpay.js";
+import { StartupReadinessReport } from "./startup/readiness.js";
 
-export function createApp(): Express {
+export function createApp(readinessReport: StartupReadinessReport): Express {
   const app = express();
+
+  if (!readinessReport.ready) {
+    const failedChecks = readinessReport.checks
+      .filter((check) => !check.ready)
+      .map((check) => `${check.dependency}: ${check.reason ?? "failed"}`)
+      .join("; ");
+    console.error(`Startup readiness checks failed: ${failedChecks}`);
+  }
 
   app.use(apiVersionMiddleware);
   app.use(versionResponseMiddleware);
@@ -46,12 +55,19 @@ export function createApp(): Express {
   return app;
 }
 
-export const app = createApp();
+export const app = createApp({ ready: true, checks: [] });
 
 export async function startServer(port: number): Promise<Server> {
-  return await new Promise((resolve) => {
+  const { runStartupDependencyReadinessChecks } = await import("./startup/readiness.js");
+
+  const readinessReport = await runStartupDependencyReadinessChecks();
+  const app = createApp(readinessReport);
+
+  return new Promise((resolve) => {
     const server = app.listen(port, () => {
+      console.log(`Server listening on port ${port}`);
       resolve(server);
     });
   });
 }
+     
