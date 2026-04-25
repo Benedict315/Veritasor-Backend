@@ -170,17 +170,60 @@ E2E tests should focus on the "Happy Path" user journeys and critical failure po
 The following security assumptions are baked into the system and must be validated by the E2E suite:
 
 1. **Isolation of Business Data**:
-    - *Assumption*: A user cannot sync or view revenue for a business they do not own.
-    - *Validation*: E2E tests must attempt unauthorized sync requests and verify `403 Forbidden` responses.
+     - *Assumption*: A user cannot sync or view revenue for a business they do not own.
+     - *Validation*: E2E tests must attempt unauthorized sync requests and verify `403 Forbidden` responses.
 
 2. **Tamper-Proof Merkle Proofs**:
-    - *Assumption*: The Merkle root submitted on-chain accurately represents the source data.
-    - *Validation*: Verify that changing a single revenue entry locally results in a Merkle proof mismatch against the on-chain root.
+     - *Assumption*: The Merkle root submitted on-chain accurately represents the source data.
+     - *Validation*: Verify that changing a single revenue entry locally results in a Merkle proof mismatch against the on-chain root.
 
 3. **Key Management**:
-    - *Assumption*: Private keys are never exposed in logs or API responses.
-    - *Validation*: Audit log assertions in E2E tests must scan for sensitive strings (G... or S... keys).
+     - *Assumption*: Private keys are never exposed in logs or API responses.
+     - *Validation*: Audit log assertions in E2E tests must scan for sensitive strings (G... or S... keys).
 
 4. **Idempotency Integrity**:
-    - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
-    - *Validation*: Check local database for single record entry after multiple POST bursts.
+     - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
+     - *Validation*: Check local database for single record entry after multiple POST bursts.
+
+## Rate Limiting Burst Behavior & Threat Model
+
+### Burst Behavior Documentation
+
+The rate limiter implements a fixed window algorithm which allows for bursts of up to `max` requests per window per bucket. This means:
+
+- Clients can make up to `max` requests immediately when a window opens
+- After `max` requests are consumed, further requests will be rate limited until the window resets
+- This behavior is suitable for APIs that need to handle short bursts of traffic while preventing sustained abuse
+
+### Threat Model Notes
+
+**Authentication Endpoints**:
+- Rate limits should be strict on auth endpoints (login, signup) to prevent credential stuffing
+- Consider using stricter limits for unauthenticated requests vs authenticated requests
+- Shared IP addresses (behind NAT/proxies) should be considered - rate limiting by IP alone may affect multiple users
+
+**Webhooks**:
+- Webhook endpoints should have higher rate limits as they may receive bursts from providers
+- Consider implementing webhook-specific rate limiters that exempt trusted providers
+- Monitor for webhook flooding attacks that could cause denial of service
+
+**Integrations**:
+- Integration endpoints (OAuth callbacks, API connections) should have moderate limits
+- Consider implementing per-user or per-business limits in addition to IP-based limits
+- OAuth state parameters help prevent CSRF but don't prevent rate limiting bypass
+
+**Shared IP Addresses**:
+- When behind proxies/NAT, multiple users may share the same IP address
+- The rate limiter uses `x-forwarded-for` header to identify the original client IP
+- For authenticated users, rate limiting falls back to user ID instead of IP
+- Operators should configure trusted proxies properly to prevent IP spoofing
+
+**Endpoint-Specific Limits**:
+- Different endpoints may require different rate limits based on their sensitivity and cost
+- The rate limiter supports route-level buckets to isolate limits between endpoints
+- Sensitive endpoints (password reset, account deletion) should have stricter limits
+
+**Failure Modes**:
+- When rate limited, clients receive HTTP 429 with Retry-After header
+- The rate limiter does not fail open - if the store encounters issues, it will continue to enforce limits
+- Memory usage grows with number of unique (bucket, identifier) pairs - monitor in production
