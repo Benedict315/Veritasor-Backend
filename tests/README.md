@@ -365,3 +365,60 @@ read replica is available, pass a replica pool client to `getById`,
 - **Idempotency**: `createWithConflictCheck` with `returnExistingOnConflict: true`
   provides idempotent create semantics; duplicate submissions return the
   existing record rather than creating a second one.
+
+---
+
+## requireBusinessAuth Middleware
+
+### What it does
+
+`src/middleware/requireBusinessAuth.ts` enforces business-scoped authentication
+on every route it guards.  It is applied to all analytics and any future
+business-scoped endpoints.
+
+### Error codes (stable contract)
+
+| Status | `code` | Trigger |
+|--------|--------|---------|
+| 401 | `MISSING_AUTH` | Missing or malformed `Authorization` header |
+| 401 | `INVALID_TOKEN` | Expired, invalid, or revoked JWT; user deleted after token issued (token replay) |
+| 400 | `MISSING_BUSINESS_ID` | No `x-business-id` header and no `business_id`/`businessId` body field |
+| 403 | `BUSINESS_NOT_FOUND` | Business absent or owned by a different user |
+| 403 | `BUSINESS_SUSPENDED` | Business exists and is owned by the user but is suspended |
+
+### Business ID extraction priority
+
+1. `x-business-id` request header
+2. `body.business_id`
+3. `body.businessId`
+
+### Structured logs
+
+| Event | Level | Fields |
+|-------|-------|--------|
+| `business_auth.success` | INFO | `userId`, `businessId` |
+| `business_auth.suspended` | WARN | `userId`, `businessId` |
+
+### Threat model notes
+
+- **Token replay**: `findUserById` is called on every request so a token for a
+  deleted user is rejected immediately — there is no server-side session cache.
+- **Role mismatch**: `business.userId === req.user.id` is checked after fetching
+  the business from the DB.  A valid token for user A cannot access user B's
+  business.
+- **Suspended businesses**: The `suspended` flag on the business record is
+  checked after ownership is confirmed.  Suspended businesses receive `403
+  BUSINESS_SUSPENDED` rather than `BUSINESS_NOT_FOUND` so operators can
+  distinguish the two states in logs.
+- **Injection**: Business ID is validated against `/^[a-zA-Z0-9\-_]{1,50}$/`
+  before it is passed to the repository.
+- **Webhooks / integrations**: Webhook endpoints use separate HMAC signature
+  verification and do not share this middleware.
+
+### Cross-route consistency
+
+The same middleware instance is used on all business-scoped routers
+(`analytics`, `attestations`, and any future routes).  The test suite in
+`tests/unit/middleware/requireBusinessAuth.test.ts` runs every error-code
+scenario against all three route contexts via `it.each` to guarantee identical
+error shapes regardless of which router the request hits.
