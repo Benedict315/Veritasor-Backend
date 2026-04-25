@@ -20,6 +20,7 @@ npm run test:coverage
 - `integration/` - Integration tests that test complete API flows
   - `auth.test.ts` - Authentication API tests (signup, login, refresh, password reset)
   - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
+- `unit/services/merkle.test.ts` - Merkle tree unit tests with golden vectors
 
 ## Test Setup
 
@@ -184,3 +185,59 @@ The following security assumptions are baked into the system and must be validat
 4. **Idempotency Integrity**:
     - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
     - *Validation*: Check local database for single record entry after multiple POST bursts.
+
+## Merkle Tree Tests (`unit/services/merkle.test.ts`)
+
+Tests the pure Merkle tree implementation in `src/services/merkle/` against the
+contract's expected proof format. All tests run with **vitest** (`npm test`).
+
+### Hash algorithm
+
+SHA-256 of the raw UTF-8 string via Node's built-in `crypto` module.
+Concatenation order: `left_hex || right_hex` (string concat, then hash).
+Odd-leaf handling: the last leaf is duplicated at each level.
+
+### Golden vectors
+
+Pre-computed with `node -e "const {createHash}=require('crypto'); ..."` and
+embedded directly in the test file so regressions are caught immediately if the
+hash function or tree construction changes.
+
+| Input leaves | Root (hex) |
+|---|---|
+| `['a']` | `ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb` |
+| `['a','b','c','d']` | `58c89d709329eb37285837b042ab6ff72c7c8f74de0446b091b6a0131c102cfd` |
+| `['a','b','c']` | `0bdf27bf7ec894ca7cadfe491ec1a3ece840f117989e8c5e9bd7086467bf6c38` |
+
+### Edge cases covered
+
+| Scenario | Expected behaviour |
+|---|---|
+| Empty leaves array | `generateProof` throws |
+| Non-array / non-string leaf | throws |
+| Non-integer `leafIndex` | throws with `/integer/i` |
+| Negative or out-of-range index | throws with `/out of range/` |
+| Single leaf | proof is `[]`; root equals `hash(leaf)` |
+| Odd leaf count | last leaf duplicated; proof still verifies |
+| Tampered sibling | `verifyProof` returns `false` |
+| Flipped position | `verifyProof` returns `false` |
+| `0x`-prefixed root / siblings | accepted and normalised |
+| Non-hex sibling | `verifyProof` returns `false` |
+| Proof length > `MERKLE_PROOF_MAX_STEPS` (256) | `isProof` / `verifyProof` return `false` |
+
+### Threat model notes
+
+- **Hash algorithm drift** — golden vectors pin the exact SHA-256 output. Any
+  change to the hash primitive (algorithm, encoding, input normalisation) will
+  break the golden-vector tests before it can silently corrupt on-chain roots.
+- **Proof length cap** — `MERKLE_PROOF_MAX_STEPS = 256` prevents unbounded CPU
+  work during verification; enforced by `isProof()` and `verifyProof()`.
+- **Input validation** — `generateProof` validates all inputs explicitly so
+  callers cannot pass `null`, floats, or out-of-range indices without an
+  immediate, descriptive error.
+- **Auth / webhook integrations** — Merkle proofs are generated server-side
+  from normalised revenue data. The proof itself contains no secrets; the
+  security property is integrity (root matches on-chain commitment), not
+  confidentiality. Webhook payloads that supply leaf data must be validated
+  against the business's connected integration credentials before being fed
+  into `buildTree`.
