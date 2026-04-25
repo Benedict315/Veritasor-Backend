@@ -2,8 +2,19 @@ import { describe, it, expect } from "vitest";
 import {
   normalizeRevenueEntry,
   detectNormalizationDrift,
+  roundAmount,
+  aggregateRevenue,
 } from "../../../../src/services/revenue/normalize.js";
-import type { NormalizedRevenue, NormalizationBaseline } from "../../../../src/services/revenue/normalize.js";
+import type {
+  RawRevenueInput,
+  NormalizedRevenue,
+  NormalizationBaseline,
+} from "../../../../src/services/revenue/normalize.js";
+
+/** Build a minimal valid RawRevenueInput with optional overrides. */
+function raw(overrides: Partial<RawRevenueInput> & { id: string; amount: number }): RawRevenueInput {
+  return { date: "2025-01-01T00:00:00Z", source: "stripe", ...overrides };
+}
 
 describe("revenue normalizer", () => {
   it("should produce the canonical shape", () => {
@@ -613,5 +624,158 @@ describe("detectNormalizationDrift", () => {
 
     expect(sourceCheck?.flag).toBe("unknown_source_drift");
     expect(sourceCheck?.score).toBe(1); // clamped to maximum
+  });
+});
+
+// ---------------------------------------------------------------------------
+// roundAmount
+// ---------------------------------------------------------------------------
+
+describe("roundAmount", () => {
+  it("rounds to 2 decimal places by default", () => {
+    expect(roundAmount(1.005)).toBe(1.01);
+    expect(roundAmount(1.004)).toBe(1.00);
+  });
+
+  it("is deterministic — same input always yields same output", () => {
+    expect(roundAmount(0.1 + 0.2)).toBe(roundAmount(0.1 + 0.2));
+    expect(roundAmount(0.1 + 0.2)).toBe(0.3);
+  });
+
+  it("handles negative amounts (refunds)", () => {
+    expect(roundAmount(-19.994)).toBe(-19.99);
+    expect(roundAmount(-19.996)).toBe(-20.00);
+    expect(Object.is(roundAmount(-0.001), 0) || Object.is(roundAmount(-0.001), -0)).toBe(true);
+  });
+
+  it("handles zero", () => {
+    expect(roundAmount(0)).toBe(0);
+    expect(roundAmount(-0)).toBe(0);
+  });
+
+  it("handles non-finite values gracefully", () => {
+    expect(roundAmount(Infinity)).toBe(0);
+    expect(roundAmount(-Infinity)).toBe(0);
+    expect(roundAmount(NaN)).toBe(0);
+  });
+
+  it("respects custom decimal places", () => {
+    expect(roundAmount(1.23456, 4)).toBe(1.2346);
+    expect(roundAmount(1.23456, 0)).toBe(1);
+  });
+
+  it("preserves whole numbers", () => {
+    expect(roundAmount(100)).toBe(100);
+    expect(roundAmount(-50)).toBe(-50);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aggregateRevenue
+// ---------------------------------------------------------------------------
+
+describe("aggregateRevenue", () => {
+  function norm(overrides: Partial<NormalizedRevenue> & { id: string; amount: number }): NormalizedRevenue {
+    return {
+      currency: "USD",
+      date: "2025-01-01T00:00:00.000Z",
+      type: overrides.amount < 0 ? "refund" : "payment",
+      source: "stripe",
+      ...overrides,
+    };
+  }
+
+  it("returns empty array for empty input", () => {
+    expect(aggregateRevenue([])).toEqual([]);
+  });
+
+  it("aggregates a single payment", () => {
+    const [result] = aggregateRevenue([norm({ id: "t1", amount: 49.99 })]);
+    expect(result.currency).toBe("USD");
+    expect(result.total).toBe(49.99);
+    expect(result.payments).toBe(49.99);
+    expect(result.refunds).toBe(0);
+    expect(result.count).toBe(1);
+  });
+
+  it("aggregates payments and refunds to a net total", () => {
+    const entries = [
+      norm({ id: "t1", amount: 100 }),
+      norm({ id: "t2", amount: -30 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    expect(result.total).toBe(70);
+    expect(result.payments).toBe(100);
+    expect(result.refunds).toBe(-30);
+  });
+
+  it("handles zero net total (full refund)", () => {
+    const entries = [
+      norm({ id: "t1", amount: 50 }),
+      norm({ id: "t2", amount: -50 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    expect(result.total).toBe(0);
+  });
+
+  it("handles all-refund batch (negative total)", () => {
+    const entries = [
+      norm({ id: "t1", amount: -10 }),
+      norm({ id: "t2", amount: -20 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    expect(result.total).toBe(-30);
+    expect(result.payments).toBe(0);
+  });
+
+  it("groups by currency (FX edges)", () => {
+    const entries = [
+      norm({ id: "u1", amount: 100, currency: "USD" }),
+      norm({ id: "e1", amount: 200, currency: "EUR" }),
+      norm({ id: "u2", amount: 50, currency: "USD" }),
+    ];
+    const results = aggregateRevenue(entries);
+    const usd = results.find((r) => r.currency === "USD")!;
+    const eur = results.find((r) => r.currency === "EUR")!;
+    expect(usd.total).toBe(150);
+    expect(eur.total).toBe(200);
+    expect(usd.count).toBe(2);
+    expect(eur.count).toBe(1);
+  });
+
+  it("produces deterministic totals for floating-point amounts", () => {
+    // 0.1 + 0.2 is a classic IEEE-754 trap
+    const entries = [
+      norm({ id: "f1", amount: 0.1 }),
+      norm({ id: "f2", amount: 0.2 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    expect(result.total).toBe(0.3);
+  });
+
+  it("rounds totals to 2 decimal places by default", () => {
+    const entries = [
+      norm({ id: "r1", amount: 1.005 }),
+      norm({ id: "r2", amount: 1.005 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    // Each rounded to 1.01, total = 2.02
+    expect(result.payments).toBe(2.01);
+    expect(result.total).toBe(2.01);
+  });
+
+  it("respects custom decimal places", () => {
+    const entries = [norm({ id: "d1", amount: 1.23456 })];
+    const [result] = aggregateRevenue(entries, 4);
+    expect(result.total).toBe(1.2346);
+  });
+
+  it("handles large amounts without overflow", () => {
+    const entries = [
+      norm({ id: "l1", amount: 1_000_000_000 }),
+      norm({ id: "l2", amount: -999_999_999 }),
+    ];
+    const [result] = aggregateRevenue(entries);
+    expect(result.total).toBe(1);
   });
 });

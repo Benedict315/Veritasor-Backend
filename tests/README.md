@@ -241,3 +241,45 @@ hash function or tree construction changes.
   confidentiality. Webhook payloads that supply leaf data must be validated
   against the business's connected integration credentials before being fed
   into `buildTree`.
+
+## Revenue Rounding & Aggregation Tests (`unit/services/revenue/normalize.test.ts`)
+
+Tests the deterministic rounding helpers added to `src/services/revenue/normalize.ts`.
+
+### `roundAmount(value, decimals?)`
+
+Symmetric half-up rounding using `Math.round((v + Number.EPSILON) * factor) / factor`.
+Avoids IEEE-754 drift that accumulates when summing many floats.
+
+| Case | Input | Output |
+|---|---|---|
+| Default 2dp | `1.005` | `1.01` |
+| Negative (refund) | `-19.995` | `-20.00` |
+| Zero | `0` | `0` |
+| Non-finite | `Infinity` / `NaN` | `0` |
+| Custom decimals | `1.23456, 4` | `1.2346` |
+
+### `aggregateRevenue(entries, decimals?)`
+
+Groups normalized entries by currency and returns per-currency `{ total, payments, refunds, count }`.
+Each bucket is rounded after summing so the same input always produces the same output.
+
+Edge cases covered:
+
+| Scenario | Expected behaviour |
+|---|---|
+| Empty input | Returns `[]` |
+| Single payment | `total === payments`, `refunds === 0` |
+| Payment + refund | `total = payments + refunds` (net) |
+| Zero net (full refund) | `total === 0` |
+| All-refund batch | `total < 0`, `payments === 0` |
+| Multi-currency (FX) | Separate bucket per currency code |
+| `0.1 + 0.2` float trap | `total === 0.3` (deterministic) |
+| Large amounts | No overflow |
+
+### Threat model notes
+
+- **Rounding consistency** — all reporting endpoints must use `roundAmount` (or `aggregateRevenue`) rather than raw JS addition to prevent totals that differ by ±0.01 across runs.
+- **Negative adjustments** — refunds are preserved as negative amounts; `aggregateRevenue` sums them separately so callers can audit gross vs net.
+- **FX edges** — aggregation is per-currency; cross-currency conversion is the caller's responsibility and must not happen inside the normalizer.
+- **Webhook inputs** — raw amounts from payment webhooks (Stripe, Razorpay, Shopify) must be validated and normalized before being passed to `aggregateRevenue`; the function trusts that `NormalizedRevenue` entries are already well-formed.
