@@ -20,6 +20,7 @@ import { app } from '../../src/app.js';
 
 const createAuthHeader = (userId: string = 'test-user-123') => ({
   Authorization: `Bearer test-token-${userId}`,
+  'x-user-id': userId,
 });
 
 describe('Business Service Integration Tests', () => {
