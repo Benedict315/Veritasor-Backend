@@ -14,7 +14,7 @@ export interface ConnectResult {
  * Start Shopify OAuth: generate state, store it, return redirect URL.
  * Caller should redirect the user to redirectUrl.
  */
-export function startConnect(shop: string, userId: string): ConnectResult {
+export function startConnect(shop: string, userId: string, businessId: string): ConnectResult {
   const clientId = process.env.SHOPIFY_CLIENT_ID ?? ''
   const scopes = process.env.SHOPIFY_SCOPES ?? 'read_orders'
   const redirectUri = process.env.SHOPIFY_REDIRECT_URI ?? ''

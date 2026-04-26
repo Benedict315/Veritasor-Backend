@@ -148,6 +148,7 @@ export async function createBusiness(req: Request, res: Response) {
       userId,
       email: req.user?.email ?? '',
       name: normalizedData.name!,
+      email: req.user!.email || '',
       industry: normalizedData.industry,
       description: normalizedData.description,
       website: normalizedData.website,

@@ -24,6 +24,17 @@ export interface CallbackResult {
 }
 
 /**
+ * Compute Shopify HMAC for request verification.
+ * Sorts parameters alphabetically and excludes the 'hmac' key.
+ */
+export function computeShopifyHmac(secret: string, params: Record<string, string | undefined>): string {
+  const { hmac: _excluded, ...filtered } = params
+  const sorted = Object.keys(filtered).sort()
+  const message = sorted.map(key => `${key}=${filtered[key]}`).join('&')
+  return createHmac('sha256', secret).update(message).digest('hex')
+}
+
+/**
  * Handle OAuth callback: consume state, exchange code for token, persist via integration store.
  */
 
